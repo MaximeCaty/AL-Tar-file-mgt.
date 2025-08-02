@@ -11,7 +11,8 @@ Have been written with the help of Grok 4 and tested on multiple tar format.
 
 Usage :
 
-  Create/Write :
+- Create/Write
+
         CreateTarArchive();
             This initialize a new tar archive with pax header in server memory.
 
@@ -19,8 +20,10 @@ Usage :
             Add a file (entry) to the tar archive
 
         SaveTarArchive(OutStream: OutStream)
+            Store the tar archive into the specified outstream
 
-  Read :
+  - Read
+
         IsTAR(InputInStream: InStream): Boolean
             Return if a file is a readable tar archive format
 
