@@ -164,7 +164,6 @@ codeunit 51003 "TOO TAR Mgt."
         Mtime: BigInteger;
         Checksum: Integer;
         PaddingSize: BigInteger;
-        DataByte: Byte;
         i: Integer;
     begin
         FileSize := FileInStream.Length;
@@ -215,10 +214,7 @@ codeunit 51003 "TOO TAR Mgt."
         for i := 1 to 512 do
             TarOutStream.Write(Header[i]);
         // Copy file data
-        while not FileInStream.EOS do begin
-            FileInStream.Read(DataByte);
-            TarOutStream.Write(DataByte);
-        end;
+        CopyStream(TarOutStream, FileInStream);
         // Padding to next 512-byte block
         PaddingSize := FileSize mod 512;
         if PaddingSize <> 0 then
@@ -483,4 +479,5 @@ codeunit 51003 "TOO TAR Mgt."
     end;
 
     #endregion        
+
 }
