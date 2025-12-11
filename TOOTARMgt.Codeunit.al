@@ -15,14 +15,17 @@ codeunit 51003 "TOO TAR Mgt."
         GetEntryList(var EntryList: List of [Text])
         ExtractEntry(EntryName: Text; var FileOutStream: OutStream)
         
+        Note : for faster files extraction, first call GetEntryList to build files position dictionnay and avoid full scan at each file.
     */
 
     var
         TempBlob: Codeunit "Temp Blob";
         TarOutStream: OutStream;
         ByteZero: Byte;
+        EntryIndex: Dictionary of [Text, BigInteger]; // Name -> Position in stream
+        EntryNames: List of [Text];                   // cached list of file names (order preserved)
 
-    procedure IsTAR(InputInStream: InStream): Boolean
+    procedure IsTAR(var InputInStream: InStream): Boolean
     var
         Header: array[512] of Byte; // TAR header block
         Magic: Text[5];
@@ -157,7 +160,7 @@ codeunit 51003 "TOO TAR Mgt."
         // Now the archive is initialized with the global PAX header. You can add file entries after this.
     end;
 
-    procedure WriteTarEntry(FileInStream: InStream; EntryName: Text)
+    procedure WriteTarEntry(var FileInStream: InStream; EntryName: Text)
     var
         Header: array[512] of Byte;
         FileSize: BigInteger;
@@ -223,10 +226,9 @@ codeunit 51003 "TOO TAR Mgt."
             TarOutStream.Write(ByteZero);
     end;
 
-    procedure SaveTarArchive(OutStream: OutStream)
+    procedure SaveTarArchive(var OutStream: OutStream)
     var
         TarInStream: InStream;
-        B: Byte;
         i: Integer;
     begin
         // Write two zero-filled 512-byte blocks to end the archive
@@ -236,37 +238,35 @@ codeunit 51003 "TOO TAR Mgt."
         TempBlob.CreateInStream(TarInStream);
         CopyStream(OutStream, TarInStream);
     end;
+
+    procedure SaveTarArchive(var vTempBlob: Codeunit "Temp Blob")
+    var
+        i: Integer;
+    begin
+        // Write two zero-filled 512-byte blocks to end the archive
+        for i := 1 to 1024 do
+            TarOutStream.Write(ByteZero);
+        vTempBlob := TempBlob;
+    end;
     #endregion
 
     #region Read TAR
-
-    procedure OpenTarArchive(TarInStreamParam: InStream)
+    procedure OpenTarArchive(var TarInStreamParam: InStream)
     var
         TempOutStream: OutStream;
-        B: Byte;
     begin
         TempBlob.CreateOutStream(TempOutStream);
         CopyStream(TempOutStream, TarInStreamParam);
+        // Optimization: Clear any existing index
+        Clear(EntryIndex);
     end;
 
-    procedure GetEntryList(var EntryList: List of [Text])
-    var
-        LocalInStream: InStream;
-        Header: array[512] of Byte;
-        Name: Text;
-        Size: BigInteger;
-        Padding: BigInteger;
+    procedure GetEntryList(var Names: List of [Text])
     begin
-        TempBlob.CreateInStream(LocalInStream);
-        while ReadHeader(LocalInStream, Header) do begin
-            Name := GetFullNameFromHeader(Header);
-            if Name <> '' then
-                EntryList.Add(Name);
-            Size := GetSizeFromHeader(Header);
-            SkipBytes(LocalInStream, Size);
-            Padding := (512 - (Size mod 512)) mod 512;
-            SkipBytes(LocalInStream, Padding);
-        end;
+        if EntryIndex.Count = 0 then
+            BuildIndexAndGetNames(Names)
+        else
+            Names := EntryNames;  // Already cached
     end;
 
     procedure ExtractEntry(EntryName: Text; FileOutStream: OutStream)
@@ -276,22 +276,31 @@ codeunit 51003 "TOO TAR Mgt."
         Name: Text;
         Size: BigInteger;
         Padding: BigInteger;
-        B: Byte;
-        i: BigInteger;
         Found: Boolean;
+        StartPos: BigInteger;
     begin
+        // Optimization: If index exists, seek directly to the entry's data position
+        if EntryIndex.ContainsKey(EntryName) then begin
+            TempBlob.CreateInStream(LocalInStream);
+            StartPos := EntryIndex.Get(EntryName);
+            LocalInStream.Position := StartPos - 512; // Back up to header start
+            if not ReadHeader(LocalInStream, Header) then
+                Error('Invalid index for entry "%1".', EntryName);
+            Size := GetSizeFromHeader(Header); // Still need size
+            CopyStream(FileOutStream, LocalInStream, Size);
+            exit;
+        end;
+        // Fallback: Sequential scan
         TempBlob.CreateInStream(LocalInStream);
         Found := false;
         while (not Found) and ReadHeader(LocalInStream, Header) do begin
             Name := GetFullNameFromHeader(Header);
-            Size := GetSizeFromHeader(Header);
-            if Name = EntryName then begin
+            if Name = EntryName then begin // Check name before computing size (cheaper)
                 Found := true;
-                for i := 1 to Size do begin
-                    LocalInStream.Read(B);
-                    FileOutStream.Write(B);
-                end;
+                Size := GetSizeFromHeader(Header);
+                CopyStream(FileOutStream, LocalInStream, Size);
             end else begin
+                Size := GetSizeFromHeader(Header);
                 SkipBytes(LocalInStream, Size);
                 Padding := (512 - (Size mod 512)) mod 512;
                 SkipBytes(LocalInStream, Padding);
@@ -303,6 +312,38 @@ codeunit 51003 "TOO TAR Mgt."
     #endregion
 
     #region Tech. Read
+    local procedure BuildIndexAndGetNames(var Names: List of [Text]): Boolean
+    var
+        InStr: InStream;
+        Header: array[512] of Byte;
+        Name: Text;
+        Size, Padding : BigInteger;
+        DataStartPos: BigInteger;
+    begin
+        Clear(EntryIndex);
+        Clear(EntryNames);
+        Clear(Names);
+
+        TempBlob.CreateInStream(InStr);
+
+        while ReadHeader(InStr, Header) do begin
+            DataStartPos := InStr.Position;         // Position = right after the 512-byte header
+            Name := GetFullNameFromHeader(Header);
+
+            if Name <> '' then begin
+                EntryIndex.Add(Name, DataStartPos);
+                EntryNames.Add(Name);
+                Names.Add(Name);                        // Return ordered list
+            end;
+
+            Size := GetSizeFromHeader(Header);
+            SkipBytes(InStr, Size);
+            Padding := (512 - (Size mod 512)) mod 512;
+            SkipBytes(InStr, Padding);
+        end;
+
+        exit(EntryIndex.Count > 0);
+    end;
 
     local procedure ReadHeader(var InStr: InStream; var Header: array[512] of Byte): Boolean
     var
@@ -311,17 +352,14 @@ codeunit 51003 "TOO TAR Mgt."
         AllZero: Boolean;
     begin
         Clear(Header);
+        AllZero := true; // Optimization: Combine read and all-zero check in one loop
         for i := 1 to 512 do begin
             BytesRead := InStr.Read(Header[i]);
             if BytesRead = 0 then
                 exit(false);
-        end;
-        AllZero := true;
-        for i := 1 to 512 do
-            if Header[i] <> 0 then begin
+            if Header[i] <> 0 then
                 AllZero := false;
-                break;
-            end;
+        end;
         exit(not AllZero);
     end;
 
@@ -330,57 +368,50 @@ codeunit 51003 "TOO TAR Mgt."
         InStr.Position := InStr.Position + Count;
     end;
 
-    local procedure LetterToByte(Letter: Text[1]) LetterByte: Byte;
-    begin
-        LetterByte := Letter[1];
-    end;
-
     local procedure GetFullNameFromHeader(var Header: array[512] of Byte): Text
     var
-        Name: Text;
-        Prefix: Text;
-        i: Integer;
-        Chr: Char;
+        Result: Text[512];
+        Pos, i : Integer;
     begin
-        Name := '';
-        for i := 1 to 100 do begin
-            if Header[i] = 0 then
-                break;
-            Chr := Header[i];
-            Name += Chr;
-        end;
-        // Check for USTAR format and prefix
-        if (Header[258] = LetterToByte('u')) and (Header[259] = LetterToByte('s')) and (Header[260] = LetterToByte('t')) and (Header[261] = LetterToByte('a')) and (Header[262] = LetterToByte('r')) and (Header[263] = 0) then begin
-            Prefix := '';
+        Pos := 0;
+
+        // Check USTAR
+        if (Header[258] = 117) and (Header[259] = 115) and (Header[260] = 116) and
+           (Header[261] = 97) and (Header[262] = 114) and (Header[263] = 0) then begin
             for i := 346 to 500 do begin
-                if Header[i] = 0 then
-                    break;
-                Chr := Header[i];
-                Prefix += Chr;
+                if Header[i] = 0 then break;
+                Pos += 1;
+                Result[Pos] := Header[i];
             end;
-            if Prefix <> '' then
-                Name := Prefix + '/' + Name;
+            if Pos > 0 then begin
+                Pos += 1;
+                Result[Pos] := 47; // '/'
+            end;
         end;
-        exit(Name);
+
+        for i := 1 to 100 do begin
+            if Header[i] = 0 then break;
+            Pos += 1;
+            Result[Pos] := Header[i];
+        end;
+
+        exit(CopyStr(Result, 1, Pos));
     end;
 
     local procedure GetSizeFromHeader(var Header: array[512] of Byte): BigInteger
     var
-        OctalStr: Text;
-        i: Integer;
-        Chr: Char;
+        Octal: Text[12];
+        Pos, i : Integer;
     begin
-        OctalStr := '';
-        for i := 125 to 135 do begin
-            if Header[i] = 0 then
-                break;
-            Chr := Header[i];
-            OctalStr += Chr;
+        Pos := 0;
+        for i := 125 to 136 do begin
+            if Header[i] = 0 then break;
+            Pos += 1;
+            Octal[Pos] := Header[i];
         end;
-        OctalStr := DelChr(OctalStr, '<', ' '); // Trim leading spaces if any
-        if OctalStr = '' then
-            exit(0);
-        exit(FromOctal(OctalStr));
+        Octal := DelChr(Octal, '<>', ' '); // Remove all spaces
+        if Octal = '' then exit(0);
+        exit(FromOctal(Octal));
     end;
 
     local procedure FromOctal(Octal: Text): BigInteger
@@ -391,7 +422,7 @@ codeunit 51003 "TOO TAR Mgt."
     begin
         Value := 0;
         for i := 1 to StrLen(Octal) do begin
-            Digit := Octal[i] - 48; // Decimal of '0' ascii character
+            Digit := Octal[i] - 48; // '0'
             if (Digit < 0) or (Digit > 7) then
                 Error('Invalid octal digit in size field.');
             Value := Value * 8 + Digit;
@@ -479,5 +510,4 @@ codeunit 51003 "TOO TAR Mgt."
     end;
 
     #endregion        
-
 }
