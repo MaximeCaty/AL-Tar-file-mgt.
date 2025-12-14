@@ -246,20 +246,16 @@ codeunit 51003 "TOO TAR Mgt."
     procedure SaveTarArchive(var OutStream: OutStream)
     var
         TarInStream: InStream;
-        i: Integer;
     begin
         // Write two zero-filled 512-byte blocks to end the archive
         if not FinalBlockWritten then
-            for i := 1 to 1024 do
-                TarOutStream.Write(ByteZero);
+            WriteZeros(1024);
         // Copy the entire archive to the output stream
         TempBlob.CreateInStream(TarInStream);
         CopyStream(OutStream, TarInStream);
     end;
 
     procedure SaveTarArchive(var vTempBlob: Codeunit "Temp Blob")
-    var
-        i: Integer;
     begin
         // Write two zero-filled 512-byte blocks to end the archive
         if not FinalBlockWritten then
@@ -268,8 +264,6 @@ codeunit 51003 "TOO TAR Mgt."
     end;
 
     procedure SaveTarArchive(var TarInStream: InStream)
-    var
-        i: Integer;
     begin
         // Write two zero-filled 512-byte blocks to end the archive
         if not FinalBlockWritten then
