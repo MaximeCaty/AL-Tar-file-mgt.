@@ -24,6 +24,11 @@ codeunit 51003 "TOO TAR Mgt."
         ByteZero: Byte;
         EntryIndex: Dictionary of [Text, BigInteger]; // Name -> Position in stream
         EntryNames: List of [Text];                   // cached list of file names (order preserved)
+        FinalBlockWritten: Boolean;
+        Mtime: BigInteger;
+        ZeroBlob: Codeunit "Temp Blob";
+        ZeroBlobInStr: InStream;
+        IsZeroBlobInitialized: Boolean;
 
     procedure IsTAR(var InputInStream: InStream): Boolean
     var
@@ -65,7 +70,11 @@ codeunit 51003 "TOO TAR Mgt."
         Padding: BigInteger;
         CharZero: Char;
     begin
+        FinalBlockWritten := false;
+        clear(TempBlob);
         TempBlob.CreateOutStream(TarOutStream);
+        Mtime := (CurrentDateTime - CreateDateTime(19700101D, 000000T)) DIV 1000;
+        InitializeZeroBlob();
 
         // Add a global PAX header to make the archive PAX-compatible (starts with 'pax_global_header')
         // This helps with compatibility, e.g., for UTF-8 or extended attributes, and ensures Windows can handle it properly
@@ -160,15 +169,15 @@ codeunit 51003 "TOO TAR Mgt."
         // Now the archive is initialized with the global PAX header. You can add file entries after this.
     end;
 
-    procedure WriteTarEntry(var FileInStream: InStream; EntryName: Text)
+    procedure WriteTarEntry(FileInStream: InStream; EntryName: Text)
     var
         Header: array[512] of Byte;
         FileSize: BigInteger;
-        Mtime: BigInteger;
         Checksum: Integer;
         PaddingSize: BigInteger;
         i: Integer;
     begin
+        FileInStream.ResetPosition();
         FileSize := FileInStream.Length;
         Clear(Header);
         // File name
@@ -182,7 +191,6 @@ codeunit 51003 "TOO TAR Mgt."
         // Size
         WriteOctalToHeader(Header, 125, 12, FileSize);
         // Mtime: Unix timestamp
-        Mtime := (CurrentDateTime - CreateDateTime(19700101D, 000000T)) DIV 1000;
         WriteOctalToHeader(Header, 137, 12, Mtime);
         // Typeflag: '0' for normal file
         Header[157] := '0';
@@ -222,8 +230,17 @@ codeunit 51003 "TOO TAR Mgt."
         PaddingSize := FileSize mod 512;
         if PaddingSize <> 0 then
             PaddingSize := 512 - PaddingSize;
-        for i := 1 to PaddingSize do
-            TarOutStream.Write(ByteZero);
+        WriteZeros(PaddingSize);
+    end;
+
+    procedure WriteTarEntry(FileContent: Text; EntryName: Text)
+    var
+        TempBlob: Codeunit "Temp Blob";
+        OutStr: OutStream;
+    begin
+        OutStr := TempBlob.CreateOutStream();
+        OutStr.Write(FileContent);
+        WriteTarEntry(TempBlob.CreateInStream(), EntryName);
     end;
 
     procedure SaveTarArchive(var OutStream: OutStream)
@@ -232,8 +249,9 @@ codeunit 51003 "TOO TAR Mgt."
         i: Integer;
     begin
         // Write two zero-filled 512-byte blocks to end the archive
-        for i := 1 to 1024 do
-            TarOutStream.Write(ByteZero);
+        if not FinalBlockWritten then
+            for i := 1 to 1024 do
+                TarOutStream.Write(ByteZero);
         // Copy the entire archive to the output stream
         TempBlob.CreateInStream(TarInStream);
         CopyStream(OutStream, TarInStream);
@@ -244,9 +262,20 @@ codeunit 51003 "TOO TAR Mgt."
         i: Integer;
     begin
         // Write two zero-filled 512-byte blocks to end the archive
-        for i := 1 to 1024 do
-            TarOutStream.Write(ByteZero);
+        if not FinalBlockWritten then
+            WriteZeros(1024);
         vTempBlob := TempBlob;
+    end;
+
+    procedure SaveTarArchive(var TarInStream: InStream)
+    var
+        i: Integer;
+    begin
+        // Write two zero-filled 512-byte blocks to end the archive
+        if not FinalBlockWritten then
+            WriteZeros(1024);
+        // Copy the entire archive to the output stream
+        TempBlob.CreateInStream(TarInStream);
     end;
     #endregion
 
@@ -256,6 +285,7 @@ codeunit 51003 "TOO TAR Mgt."
         TempOutStream: OutStream;
     begin
         TempBlob.CreateOutStream(TempOutStream);
+        TarInStreamParam.ResetPosition();
         CopyStream(TempOutStream, TarInStreamParam);
         // Optimization: Clear any existing index
         Clear(EntryIndex);
@@ -507,6 +537,26 @@ codeunit 51003 "TOO TAR Mgt."
             Header[Pos + i - 1] := Octal[i];
         Header[Pos + 6] := 0;
         Header[Pos + 7] := 32;
+    end;
+
+    local procedure WriteZeros(Size: Integer)
+    begin
+        ZeroBlobInStr.ResetPosition();
+        CopyStream(TarOutStream, ZeroBlobInStr, Size);
+    end;
+
+    procedure InitializeZeroBlob()
+    var
+        ZeroOutStream: OutStream;
+        i: Integer;
+    begin
+        if IsZeroBlobInitialized then
+            exit;
+        ZeroBlob.CreateOutStream(ZeroOutStream);
+        for i := 1 to 1024 do
+            ZeroOutStream.Write(ByteZero);
+        IsZeroBlobInitialized := true;
+        ZeroBlob.CreateInStream(ZeroBlobInStr);
     end;
 
     #endregion        
